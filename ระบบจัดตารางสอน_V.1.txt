@@ -1,0 +1,240 @@
+CodeGS
+
+// เมื่อเปิด Sheet ให้สร้างเมนู "📅 ตารางสอน"
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("📅 ตารางสอน")
+    .addItem("เพิ่มตารางสอน", "showScheduleForm")
+    .addToUi();
+}
+
+// แสดง Sidebar Form
+function showScheduleForm() {
+  const html = HtmlService.createHtmlOutputFromFile("ScheduleForm")
+    .setTitle("เพิ่มตารางสอน")
+    .setWidth(400);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+// ดึง dropdown list สำหรับฟอร์ม
+function getDropdownData() {
+  const ss = SpreadsheetApp.getActive();
+  const getList = (sheetName) => {
+    const sheet = ss.getSheetByName(sheetName);
+    return sheet.getRange(2, 1, sheet.getLastRow()-1, 1).getValues().flat();
+  };
+  return {
+    teachers: getList("Teachers"),
+    rooms: getList("Rooms"),
+    weekdays: getList("Weekdays")
+  };
+}
+
+// แปลงชื่อวันเป็นเลข (0 = อาทิตย์, 1 = จันทร์, ... 6 = เสาร์)
+function getDayNumber(thaiDay) {
+  const map = {
+    "อาทิตย์": 0, "จันทร์": 1, "อังคาร": 2, "พุธ": 3, "พฤหัสบดี": 4, "ศุกร์": 5, "เสาร์": 6
+  };
+  return map[thaiDay] ?? -1;
+}
+
+// ตรวจวันหยุด
+function isHoliday(date) {
+  const holidays = SpreadsheetApp.getActive().getSheetByName("HolidayList")
+    .getRange(2, 1, SpreadsheetApp.getActive().getSheetByName("HolidayList").getLastRow()-1, 1)
+    .getValues().flat().map(d => new Date(d).toDateString());
+  return holidays.includes(new Date(date).toDateString());
+}
+
+// ตรวจความซ้ำของตาราง
+function isConflict(date, startTime, endTime, teacher, room) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName("ScheduleData");
+  const data = sheet.getDataRange().getValues();
+
+  const baseDateStr = new Date(date).toDateString();
+  const newStart = toMinutes(startTime);
+  const newEnd = toMinutes(endTime);
+
+  for (let i = 1; i < data.length; i++) {
+    const [d, s, e, t, r] = data[i];
+    if (!d || !s || !e || !t || !r) continue;
+
+    const dateStr = new Date(d).toDateString();
+    if (dateStr !== baseDateStr) continue;
+
+    const existStart = toMinutes(s);
+    const existEnd = toMinutes(e);
+
+    const isOverlap = !(newEnd <= existStart || newStart >= existEnd);
+
+    if ((t === teacher || r === room) && isOverlap) {
+      return {
+        conflict: true,
+        detail: `📌 ชนกับ ${t} ที่ห้อง ${r}`
+      };
+    }
+  }
+
+  return { conflict: false };
+}
+
+// ฟังก์ชันช่วย: แปลง "10:30" → 630 นาที
+function toMinutes(timeStr) {
+  if (typeof timeStr === 'object' && timeStr.getHours) {
+    return timeStr.getHours() * 60 + timeStr.getMinutes();
+  }
+
+  const parts = timeStr.split(':');
+  return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+}
+
+
+// เพิ่มตารางเรียน recurring
+function addSchedule(formData) {
+  try {
+    const { teacher, room, weekday, startTime, endTime } = formData;
+    const dayOfWeek = getDayNumber(weekday);
+    if (dayOfWeek === -1) return "❌ วันไม่ถูกต้อง";
+
+    const sMinutes = toMinutes(startTime);
+    const eMinutes = toMinutes(endTime);
+    if (sMinutes == null || eMinutes == null || eMinutes <= sMinutes) {
+      return "❌ เวลาเริ่มต้องมากกว่าเวลาสิ้นสุด และห้ามใช้ 00:00 (เที่ยงคืน)";
+    }
+
+    const config = SpreadsheetApp.getActive().getSheetByName("Config").getRange("A2:B2").getValues()[0];
+    const [startDate, endDate] = [new Date(config[0]), new Date(config[1])];
+    const sheet = SpreadsheetApp.getActive().getSheetByName("ScheduleData");
+
+    let currentDate = new Date(startDate);
+    let added = 0;
+    const conflictSet = new Set();
+
+    while (currentDate <= endDate) {
+      if (currentDate.getDay() === dayOfWeek && !isHoliday(currentDate)) {
+        const result = isConflict(currentDate, startTime, endTime, teacher, room);
+        if (result.conflict) {
+          conflictSet.add(result.detail);
+        } else {
+          const dateStr = Utilities.formatDate(currentDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
+          sheet.appendRow([
+            dateStr, startTime, endTime, teacher, room, Session.getActiveUser().getEmail()
+          ]);
+          added++;
+        }
+      }
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    let message = `${added} รายการถูกเพิ่มแล้ว`;
+    if (conflictSet.size > 0) {
+      message += `\n❌ ไม่สามารถเพิ่ม ${conflictSet.size} รายการ เนื่องจากชนกับ:\n` +
+                 [...conflictSet].join('\n');
+    }
+
+    return message;
+
+  } catch (err) {
+    Logger.log("❌ ERROR: " + err.message);
+    return `❌ เกิดข้อผิดพลาด: ${err.message}`;
+  }
+}
+
+CodeHTML
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 10px;
+      }
+      label {
+        font-weight: bold;
+      }
+      select, input {
+        width: 100%;
+        margin-bottom: 12px;
+        padding: 6px;
+        font-size: 14px;
+      }
+      button {
+        background-color: #28a745;
+        color: white;
+        padding: 10px;
+        border: none;
+        width: 100%;
+        cursor: pointer;
+        font-size: 16px;
+        margin-top: 8px;
+      }
+      #result {
+        margin-top: 10px;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>เพิ่มตารางสอน</h3>
+
+    <label for="teacher">อาจารย์:</label>
+    <select id="teacher"></select>
+
+    <label for="weekday">วันในสัปดาห์:</label>
+    <select id="weekday"></select>
+
+    <label for="startTime">เวลาเริ่ม:</label>
+    <input type="time" id="startTime">
+
+    <label for="endTime">เวลาสิ้นสุด:</label>
+    <input type="time" id="endTime">
+
+    <label for="room">ห้องเรียน:</label>
+    <select id="room"></select>
+
+    <button onclick="submitForm()">บันทึก</button>
+
+    <p id="result"></p>
+
+    <script>
+      // โหลด dropdown จาก Apps Script
+      google.script.run.withSuccessHandler(function(data) {
+        fillDropdown('teacher', data.teachers);
+        fillDropdown('weekday', data.weekdays);
+        fillDropdown('room', data.rooms);
+      }).getDropdownData();
+
+      function fillDropdown(id, items) {
+        const select = document.getElementById(id);
+        items.forEach(item => {
+          const option = document.createElement("option");
+          option.value = item;
+          option.text = item;
+          select.appendChild(option);
+        });
+      }
+
+      function submitForm() {
+        const formData = {
+          teacher: document.getElementById("teacher").value,
+          weekday: document.getElementById("weekday").value,
+          startTime: document.getElementById("startTime").value,
+          endTime: document.getElementById("endTime").value,
+          room: document.getElementById("room").value
+        };
+
+        // แสดงสถานะขณะกำลังส่งข้อมูล
+        const resultElem = document.getElementById("result");
+        resultElem.style.color = "gray";
+        resultElem.innerText = "⏳ กำลังบันทึก...";
+
+        // เรียก Apps Script
+        google.script.run.withSuccessHandler(function(response) {
+          resultElem.innerText = response;
+          resultElem.style.color = response.startsWith("❌") ? "darkred" : "green";
+        }).addSchedule(formData);
+      }
+    </script>
+  </body>
+</html>
