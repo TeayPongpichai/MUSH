@@ -1,0 +1,143 @@
+CodeGS
+// 🟩 สร้างเมนูเมื่อเปิดไฟล์
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("📅 ตารางสอน")
+    .addItem("เพิ่มตารางสอน", "showScheduleForm")
+    .addToUi();
+}
+
+// 🟩 แสดง Sidebar
+function showScheduleForm() {
+  const html = HtmlService.createHtmlOutputFromFile("ScheduleForm")
+    .setTitle("เพิ่มตารางสอน")
+    .setWidth(400);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+// 🟩 ดึงข้อมูล dropdown list
+function getDropdownData() {
+  const ss = SpreadsheetApp.getActive();
+  const getList = (sheetName) => {
+    const sheet = ss.getSheetByName(sheetName);
+    return sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues().flat();
+  };
+  return {
+    teachers: getList("Teachers"),
+    rooms: getList("Rooms"),
+    weekdays: getList("Weekdays")
+  };
+}
+
+// 🟩 แปลงชื่อวันเป็นเลข 0–6
+function getDayNumber(thaiDay) {
+  const map = {
+    "อาทิตย์": 0, "จันทร์": 1, "อังคาร": 2, "พุธ": 3,
+    "พฤหัสบดี": 4, "ศุกร์": 5, "เสาร์": 6
+  };
+  return map[thaiDay] ?? -1;
+}
+
+// 🟩 แปลง Date → วันภาษาไทย
+function getThaiDayName(date) {
+  const days = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
+  return days[date.getDay()];
+}
+
+// 🟩 ตรวจสอบวันหยุด
+function isHoliday(date) {
+  const holidays = SpreadsheetApp.getActive().getSheetByName("HolidayList")
+    .getRange(2, 1, SpreadsheetApp.getActive().getSheetByName("HolidayList").getLastRow() - 1, 1)
+    .getValues().flat().map(d => new Date(d).toDateString());
+  return holidays.includes(new Date(date).toDateString());
+}
+
+// 🟩 แปลงเวลาเป็นนาที
+function toMinutes(timeStr) {
+  if (typeof timeStr === 'object' && timeStr.getHours) {
+    return timeStr.getHours() * 60 + timeStr.getMinutes();
+  }
+  const parts = timeStr.split(':');
+  return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+}
+
+// 🟩 ตรวจสอบว่าตารางซ้ำกันหรือไม่
+function isConflict(date, startTime, endTime, teacher, room) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName("ScheduleData");
+  const data = sheet.getDataRange().getValues();
+  const baseDateStr = new Date(date).toDateString();
+  const newStart = toMinutes(startTime);
+  const newEnd = toMinutes(endTime);
+
+  for (let i = 1; i < data.length; i++) {
+    const [d, , , t, r] = data[i];
+    const s = data[i][2 - 1]; // เวลาเริ่ม
+    const e = data[i][3 - 1]; // เวลาสิ้นสุด
+
+    if (!d || !s || !e || !t || !r) continue;
+    if (new Date(d).toDateString() !== baseDateStr) continue;
+
+    const existStart = toMinutes(s);
+    const existEnd = toMinutes(e);
+    const isOverlap = !(newEnd <= existStart || newStart >= existEnd);
+
+    if ((t === teacher || r === room) && isOverlap) {
+      return {
+        conflict: true,
+        detail: `📌 ชนกับ ${t} ที่ ${r}`
+      };
+    }
+  }
+  return { conflict: false };
+}
+
+// 🟩 เพิ่มตารางสอนแบบ recurring
+function addSchedule(formData) {
+  try {
+    const { teacher, room, weekday, startTime, endTime } = formData;
+    const dayOfWeek = getDayNumber(weekday);
+    if (dayOfWeek === -1) return "❌ วันไม่ถูกต้อง";
+
+    const sMinutes = toMinutes(startTime);
+    const eMinutes = toMinutes(endTime);
+    if (sMinutes == null || eMinutes == null || eMinutes <= sMinutes) {
+      return "❌ เวลาเริ่มต้องมากกว่าเวลาสิ้นสุด และห้ามใช้ 00:00 (เที่ยงคืน)";
+    }
+
+    const config = SpreadsheetApp.getActive().getSheetByName("Config").getRange("A2:B2").getValues()[0];
+    const [startDate, endDate] = [new Date(config[0]), new Date(config[1])];
+    const sheet = SpreadsheetApp.getActive().getSheetByName("ScheduleData");
+
+    let currentDate = new Date(startDate);
+    let added = 0;
+    const conflictSet = new Set();
+
+    while (currentDate <= endDate) {
+      if (currentDate.getDay() === dayOfWeek && !isHoliday(currentDate)) {
+        const result = isConflict(currentDate, startTime, endTime, teacher, room);
+        if (result.conflict) {
+          conflictSet.add(result.detail);
+        } else {
+          const dateStr = Utilities.formatDate(currentDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
+          const thaiDay = getThaiDayName(currentDate);
+          sheet.appendRow([
+            dateStr, thaiDay, startTime, endTime, teacher, room, Session.getActiveUser().getEmail()
+          ]);
+          added++;
+        }
+      }
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    let message = `${added} รายการถูกเพิ่มแล้ว`;
+    if (conflictSet.size > 0) {
+      message += `\n❌ ไม่สามารถเพิ่ม ${conflictSet.size} รายการ เนื่องจากชนกับ:\n` +
+                 [...conflictSet].join('\n');
+    }
+    return message;
+
+  } catch (err) {
+    Logger.log("❌ ERROR: " + err.message);
+    return `❌ เกิดข้อผิดพลาด: ${err.message}`;
+  }
+}
