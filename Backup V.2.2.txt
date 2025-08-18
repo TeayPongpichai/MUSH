@@ -1,0 +1,306 @@
+// 🟩 สร้างเมนูเมื่อเปิดไฟล์
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("📅 ตารางสอน")
+    .addItem("เพิ่มตารางสอน", "showScheduleForm")
+    .addToUi();
+}
+
+// 🟩 แสดง Sidebar
+function showScheduleForm() {
+  const html = HtmlService.createHtmlOutputFromFile("ScheduleForm")
+    .setTitle("เพิ่มตารางสอน")
+    .setWidth(400);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+// 🟩 ดึงข้อมูล dropdown list (แนะนำให้ cache เพื่อความเร็ว)
+function getDropdownData() {
+  const ss = SpreadsheetApp.getActive();
+  const getList = (sheetName) => {
+    const sheet = ss.getSheetByName(sheetName);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return [];
+    return sheet.getRange(2, 1, lastRow - 1, 1).getValues().flat();
+  };
+
+  return {
+    terms: getList("Terms"),
+    programs: getList("Programs"),
+    departments: getList("Departments"),
+    subjects: getList("Subjects"),
+    teachers: getList("Teachers"),
+    rooms: getList("Rooms"),
+    weekdays: getList("Weekdays")
+  };
+}
+
+// 🟩 แปลงชื่อวันเป็นเลข 0–6
+function getDayNumber(thaiDay) {
+  const map = {
+    "อาทิตย์": 0, "จันทร์": 1, "อังคาร": 2, "พุธ": 3,
+    "พฤหัสบดี": 4, "ศุกร์": 5, "เสาร์": 6
+  };
+  return map[thaiDay] ?? -1;
+}
+
+// 🟩 แปลง Date → วันภาษาไทย
+function getThaiDayName(date) {
+  const days = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
+  return days[date.getDay()];
+}
+
+// 🟩 แปลงเวลาเป็นนาที
+function toMinutes(timeStr) {
+  if (typeof timeStr === 'object' && timeStr.getHours) {
+    return timeStr.getHours() * 60 + timeStr.getMinutes();
+  }
+  const parts = timeStr.split(':');
+  return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+}
+
+// 🟩 เพิ่มตารางสอนแบบ Lean + Conflict รายละเอียด
+function addSchedule(formData) {
+  try {
+    const {
+      term,         // เทอม
+      program,      // หลักสูตร
+      department,   // สาขา
+      subject,      // วิชา
+      weekday,
+      startTime,
+      endTime,
+      teacher,
+      room
+    } = formData;
+    const dayOfWeek = getDayNumber(weekday);
+    if (dayOfWeek === -1) return "❌ วันไม่ถูกต้อง";
+
+    const sMinutes = toMinutes(startTime);
+    const eMinutes = toMinutes(endTime);
+    if (sMinutes == null || eMinutes == null || eMinutes <= sMinutes) {
+      return "❌ เวลาเริ่มต้องมากกว่าเวลาสิ้นสุด และห้ามใช้ 00:00";
+    }
+
+    const ss = SpreadsheetApp.getActive();
+    const config = ss.getSheetByName("Config").getRange("A2:B2").getValues()[0];
+    const [startDate, endDate] = [new Date(config[0]), new Date(config[1])];
+
+    const sheet = ss.getSheetByName("ScheduleData");
+    const existingData = sheet.getDataRange().getValues();
+
+    // ✅ ดึงวันหยุด
+    const holidayList = ss.getSheetByName("HolidayList").getRange("A2:A").getValues().flat()
+      .filter(d => d instanceof Date).map(d => d.toDateString());
+
+    const newRows = [];
+    const conflictSet = new Set();
+    const userEmail = Session.getActiveUser().getEmail();
+
+      let currentDate = new Date(startDate);
+    while (currentDate <= endDate) {
+      if (currentDate.getDay() === dayOfWeek && !holidayList.includes(currentDate.toDateString())) {
+        const dateStr = currentDate.toDateString();
+        const newStart = sMinutes;
+        const newEnd = eMinutes;
+
+        let hasConflict = false;
+
+        existingData.forEach(row => {
+          const [tm, prog, dept, subj, d, , s, e, t, r] = row;
+          if (!(d && s && e && t && r)) return;
+          if (new Date(d).toDateString() !== dateStr) return;
+
+          const existStart = toMinutes(s);
+          const existEnd = toMinutes(e);
+          const overlap = !(newEnd <= existStart || newStart >= existEnd);
+
+          if (overlap) {
+            if (t === teacher) conflictSet.add(`ชนกับอาจารย์ ${t}`);
+            if (r === room) conflictSet.add(`ห้อง ${r} ถูกใช้แล้ว`);
+            if (prog === program && dept === department) {
+              conflictSet.add(`นักเรียน ${program}/${department} มีเรียนเวลาเดียวกัน`);
+            }
+            hasConflict = true;
+          }
+        });
+
+        if (!hasConflict) {
+          const formattedDate = Utilities.formatDate(currentDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
+          const thaiDay = getThaiDayName(currentDate);
+          newRows.push([
+            term, program, department, subject,     // A-D
+            formattedDate, thaiDay, startTime, endTime, // E-H
+            teacher, room, userEmail                // I-K
+          ]);
+        }
+      }
+
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    if (newRows.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+    }
+
+    let message = `${newRows.length} รายการถูกเพิ่มแล้ว`;
+    if (conflictSet.size > 0) {
+      message += `\n❌ ไม่สามารถเพิ่ม ${conflictSet.size} รายการ เนื่องจากชนกับ:\n` +
+             [...conflictSet].join('\n');
+    }
+    return message;
+
+  } catch (err) {
+    Logger.log("❌ ERROR: " + err.message);
+    return `❌ เกิดข้อผิดพลาด: ${err.message}`;
+  }
+}
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        padding: 10px;
+      }
+      label {
+        display: block;
+        margin-top: 10px;
+        font-weight: bold;
+      }
+      select, button {
+        width: 100%;
+        padding: 6px;
+        margin-top: 5px;
+        box-sizing: border-box;
+      }
+      #status {
+        margin-top: 15px;
+        white-space: pre-wrap;
+        color: #33691e;
+        font-weight: bold;
+      }
+      .logo {
+        width: 200px;
+        margin-bottom: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 🔰 โลโก้ -->
+    <img class="logo" src="https://sh.mahidol.ac.th/img/Logo/Logo_th.png" alt="Mahidol Logo">
+    <h3>📅 ระบบจัดตารางสอน</h3>
+
+    <!-- 🔽 Term & Program -->
+    <label for="term">เทอม:</label>
+    <select id="term"></select>
+
+    <label for="program">หลักสูตร:</label>
+    <select id="program"></select>
+
+    <label for="department">สาขา:</label>
+    <select id="department"></select>
+
+    <label for="subject">วิชา:</label>
+    <select id="subject"></select>
+
+    <!-- 🔽 วัน เวลา -->
+    <label for="weekday">วัน:</label>
+    <select id="weekday"></select>
+
+    <label for="startTime">เวลาเริ่ม:</label>
+    <select id="startTime">
+      <option value="08:00">08:00</option>
+      <option value="09:00">09:00</option>
+      <option value="10:00">10:00</option>
+      <option value="11:00">11:00</option>
+      <option value="12:00">12:00</option>
+      <option value="13:00">13:00</option>
+      <option value="14:00">14:00</option>
+      <option value="15:00">15:00</option>
+      <option value="16:00">16:00</option>
+      <option value="17:00">17:00</option>
+      <option value="18:00">18:00</option>
+      <option value="19:00">19:00</option>
+      <option value="20:00">20:00</option>
+    </select>
+
+    <label for="endTime">เวลาสิ้นสุด:</label>
+    <select id="endTime">
+      <option value="09:00">09:00</option>
+      <option value="10:00">10:00</option>
+      <option value="11:00">11:00</option>
+      <option value="12:00">12:00</option>
+      <option value="13:00">13:00</option>
+      <option value="14:00">14:00</option>
+      <option value="15:00">15:00</option>
+      <option value="16:00">16:00</option>
+      <option value="17:00">17:00</option>
+      <option value="18:00">18:00</option>
+      <option value="19:00">19:00</option>
+      <option value="20:00">20:00</option>
+    </select>
+
+    <!-- 🔽 อาจารย์ ห้อง -->
+    <label for="teacher">อาจารย์:</label>
+    <select id="teacher"></select>
+
+    <label for="room">ห้อง:</label>
+    <select id="room"></select>
+
+    <!-- 🔘 ปุ่มบันทึก -->
+    <button onclick="submitForm()">➕ บันทึก</button>
+    <div id="status"></div>
+
+    <script>
+        function submitForm() {
+    const data = {
+      term: term.value,
+      program: program.value,
+      department: department.value,
+      subject: subject.value,
+      weekday: weekday.value,
+      startTime: startTime.value,
+      endTime: endTime.value,
+      teacher: teacher.value,
+      room: room.value,
+    };
+
+    status.textContent = "⏳ กำลังบันทึก...";
+    google.script.run.withSuccessHandler(function (msg) {
+      // แสดงเป็น Popup (ใน Sidebar) แทน
+      alert(msg);
+      // เคลียร์ข้อความสถานะใต้ปุ่ม
+      status.textContent = "";
+    }).addSchedule(data);
+  }
+
+      function loadDropdowns() {
+        google.script.run.withSuccessHandler(function (data) {
+          const setOptions = (id, list) => {
+            const sel = document.getElementById(id);
+            sel.innerHTML = "";
+            list.forEach(item => {
+              const opt = document.createElement("option");
+              opt.value = item;
+              opt.text = item;
+              sel.appendChild(opt);
+            });
+          };
+
+          setOptions("term", data.terms);
+          setOptions("program", data.programs);
+          setOptions("department", data.departments);
+          setOptions("subject", data.subjects);
+          setOptions("weekday", data.weekdays);
+          setOptions("teacher", data.teachers);
+          setOptions("room", data.rooms);
+        }).getDropdownData();
+      }
+
+      loadDropdowns();
+    </script>
+  </body>
+</html>
