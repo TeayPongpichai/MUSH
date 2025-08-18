@@ -23,7 +23,12 @@ function getDropdownData() {
     if (lastRow < 2) return [];
     return sheet.getRange(2, 1, lastRow - 1, 1).getValues().flat();
   };
+
   return {
+    terms: getList("Terms"),
+    programs: getList("Programs"),
+    departments: getList("Departments"),
+    subjects: getList("Subjects"),
     teachers: getList("Teachers"),
     rooms: getList("Rooms"),
     weekdays: getList("Weekdays")
@@ -57,14 +62,24 @@ function toMinutes(timeStr) {
 // 🟩 เพิ่มตารางสอนแบบ Lean + Conflict รายละเอียด
 function addSchedule(formData) {
   try {
-    const { teacher, room, weekday, startTime, endTime } = formData;
+    const {
+      term,         // เทอม
+      program,      // หลักสูตร
+      department,   // สาขา
+      subject,      // วิชา
+      weekday,
+      startTime,
+      endTime,
+      teacher,
+      room
+    } = formData;
     const dayOfWeek = getDayNumber(weekday);
     if (dayOfWeek === -1) return "❌ วันไม่ถูกต้อง";
 
     const sMinutes = toMinutes(startTime);
     const eMinutes = toMinutes(endTime);
     if (sMinutes == null || eMinutes == null || eMinutes <= sMinutes) {
-      return "❌ เวลาเริ่มต้องมากกว่าเวลาสิ้นสุด และห้ามใช้ 00:00 (เที่ยงคืน)";
+      return "❌ เวลาเริ่มต้องมากกว่าเวลาสิ้นสุด และห้ามใช้ 00:00";
     }
 
     const ss = SpreadsheetApp.getActive();
@@ -82,7 +97,7 @@ function addSchedule(formData) {
     const conflictSet = new Set();
     const userEmail = Session.getActiveUser().getEmail();
 
-    let currentDate = new Date(startDate);
+      let currentDate = new Date(startDate);
     while (currentDate <= endDate) {
       if (currentDate.getDay() === dayOfWeek && !holidayList.includes(currentDate.toDateString())) {
         const dateStr = currentDate.toDateString();
@@ -92,7 +107,7 @@ function addSchedule(formData) {
         let hasConflict = false;
 
         existingData.forEach(row => {
-          const [d, , s, e, t, r] = row;
+          const [tm, prog, dept, subj, d, , s, e, t, r] = row;
           if (!(d && s && e && t && r)) return;
           if (new Date(d).toDateString() !== dateStr) return;
 
@@ -101,19 +116,26 @@ function addSchedule(formData) {
           const overlap = !(newEnd <= existStart || newStart >= existEnd);
 
           if (overlap) {
-            if (t === teacher || r === room) {
-              conflictSet.add(`📌 ชนกับ ${t} ที่ ${r}`);
-              hasConflict = true;
+            if (t === teacher) conflictSet.add(`ชนกับอาจารย์ ${t}`);
+            if (r === room) conflictSet.add(`ห้อง ${r} ถูกใช้แล้ว`);
+            if (prog === program && dept === department) {
+              conflictSet.add(`นักเรียน ${program}/${department} มีเรียนเวลาเดียวกัน`);
             }
+            hasConflict = true;
           }
         });
 
         if (!hasConflict) {
           const formattedDate = Utilities.formatDate(currentDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
           const thaiDay = getThaiDayName(currentDate);
-          newRows.push([formattedDate, thaiDay, startTime, endTime, teacher, room, userEmail]);
+          newRows.push([
+            term, program, department, subject,     // A-D
+            formattedDate, thaiDay, startTime, endTime, // E-H
+            teacher, room, userEmail                // I-K
+          ]);
         }
       }
+
       currentDate.setDate(currentDate.getDate() + 1);
     }
 
@@ -124,9 +146,8 @@ function addSchedule(formData) {
     let message = `${newRows.length} รายการถูกเพิ่มแล้ว`;
     if (conflictSet.size > 0) {
       message += `\n❌ ไม่สามารถเพิ่ม ${conflictSet.size} รายการ เนื่องจากชนกับ:\n` +
-                 [...conflictSet].join('\n');
+             [...conflictSet].join('\n');
     }
-
     return message;
 
   } catch (err) {
@@ -168,11 +189,24 @@ function addSchedule(formData) {
     </style>
   </head>
   <body>
-    <!-- 🔰 โลโก้ชิดซ้ายบนสุด -->
+    <!-- 🔰 โลโก้ -->
     <img class="logo" src="https://sh.mahidol.ac.th/img/Logo/Logo_th.png" alt="Mahidol Logo">
-
     <h3>📅 ระบบจัดตารางสอน</h3>
 
+    <!-- 🔽 Term & Program -->
+    <label for="term">เทอม:</label>
+    <select id="term"></select>
+
+    <label for="program">หลักสูตร:</label>
+    <select id="program"></select>
+
+    <label for="department">สาขา:</label>
+    <select id="department"></select>
+
+    <label for="subject">วิชา:</label>
+    <select id="subject"></select>
+
+    <!-- 🔽 วัน เวลา -->
     <label for="weekday">วัน:</label>
     <select id="weekday"></select>
 
@@ -209,52 +243,57 @@ function addSchedule(formData) {
       <option value="20:00">20:00</option>
     </select>
 
+    <!-- 🔽 อาจารย์ ห้อง -->
     <label for="teacher">อาจารย์:</label>
     <select id="teacher"></select>
 
-    <label for="room">ห้องเรียน:</label>
+    <label for="room">ห้อง:</label>
     <select id="room"></select>
 
+    <!-- 🔘 ปุ่มบันทึก -->
     <button onclick="submitForm()">➕ บันทึก</button>
     <div id="status"></div>
 
     <script>
       function submitForm() {
         const data = {
+          term: document.getElementById("term").value,
+          program: document.getElementById("program").value,
+          department: document.getElementById("department").value,
+          subject: document.getElementById("subject").value,
           weekday: document.getElementById("weekday").value,
           startTime: document.getElementById("startTime").value,
           endTime: document.getElementById("endTime").value,
           teacher: document.getElementById("teacher").value,
           room: document.getElementById("room").value,
         };
-        document.getElementById("status").innerText = "⏳ กำลังบันทึก...";
 
+        document.getElementById("status").innerText = "⏳ กำลังบันทึก...";
         google.script.run.withSuccessHandler(function (msg) {
           document.getElementById("status").innerText = msg;
         }).addSchedule(data);
       }
 
-      // โหลด dropdown จาก Apps Script
       function loadDropdowns() {
         google.script.run.withSuccessHandler(function (data) {
-          const { weekdays, teachers, rooms } = data;
-
           const setOptions = (id, list) => {
             const sel = document.getElementById(id);
             sel.innerHTML = "";
-            const frag = document.createDocumentFragment();
             list.forEach(item => {
               const opt = document.createElement("option");
               opt.value = item;
               opt.text = item;
-              frag.appendChild(opt);
+              sel.appendChild(opt);
             });
-            sel.appendChild(frag);
           };
 
-          setOptions("weekday", weekdays);
-          setOptions("teacher", teachers);
-          setOptions("room", rooms);
+          setOptions("term", data.terms);
+          setOptions("program", data.programs);
+          setOptions("department", data.departments);
+          setOptions("subject", data.subjects);
+          setOptions("weekday", data.weekdays);
+          setOptions("teacher", data.teachers);
+          setOptions("room", data.rooms);
         }).getDropdownData();
       }
 
@@ -262,4 +301,3 @@ function addSchedule(formData) {
     </script>
   </body>
 </html>
-
