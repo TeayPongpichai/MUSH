@@ -1,0 +1,216 @@
+/ระบบเกษียณหนังสือ/
+/***** 🔧 ตั้งค่า *****/
+const CONFIG = {
+  SHEET_NAME: 'Sheet1',
+  TEMPLATE_DOC_ID: '1WRLqvWCCrP8hGhSoyqdp4UfZqyyWVEG0Y6qsDtLcEOs',
+  OUTPUT_FOLDER_ID: '1YhQtA2W-clbuzB9nB5zIRz98TcgBGSpL',
+  HEADER_ROW: 1,
+  DOC_URL_HEADER: 'Doc URL',
+  // ใช้ "ชื่อหัวคอลัมน์" สำหรับพรีวิว
+  PREVIEW_HEADERS: ['ชื่อ-สกุล','ประเภท','หน่วยงานที่เชิญ','วัน/เวลาดำเนินการ'],
+};
+
+/***** เมนู & Sidebar *****/
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('📄 ระบบเกษียนหนังสือ')
+    .addItem('เปิด Sidebar', 'showMergeSidebar')
+    .addToUi();
+}
+
+function showMergeSidebar() {
+  const html = HtmlService.createTemplateFromFile('Sidebar').evaluate()
+    .setTitle('ระบบเกษียนหนังสือ')
+    .setWidth(380);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+/***** ดึงรายการพรีวิวตามคอลัมน์ที่กำหนด *****/
+function getRowsPreview() {
+  const sh = SpreadsheetApp.getActive().getSheetByName(CONFIG.SHEET_NAME);
+  if (!sh) throw new Error(`ไม่พบชีต ${CONFIG.SHEET_NAME}`);
+  const lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
+  if (lastRow <= CONFIG.HEADER_ROW) return [];
+
+  const header = sh.getRange(CONFIG.HEADER_ROW, 1, 1, lastCol).getValues()[0];
+  const values = sh.getRange(CONFIG.HEADER_ROW + 1, 1, lastRow - CONFIG.HEADER_ROW, lastCol).getValues();
+
+  const headerIndex = {};
+  header.forEach((h,i) => headerIndex[String(h).trim()] = i);
+
+  return values.map((row, i) => {
+    const rowNo = CONFIG.HEADER_ROW + 1 + i;
+    const parts = CONFIG.PREVIEW_HEADERS.map(h => {
+      const idx = headerIndex[h];
+      return idx != null ? (row[idx] instanceof Date
+        ? Utilities.formatDate(row[idx], Session.getScriptTimeZone(), 'd MMM yy HH:mm')
+        : (row[idx] ?? '')) : '';
+    }).filter(Boolean);
+    return { rowNumber: rowNo, display: parts.join(' | ') || `แถว ${rowNo}` };
+  });
+}
+
+/***** สร้างเอกสารหลายแถว *****/
+function createDocsFromRows(rowNumbers) {
+  if (!Array.isArray(rowNumbers) || rowNumbers.length === 0) {
+    throw new Error('ไม่ได้ส่งหมายเลขแถวเข้ามา');
+  }
+  const results = [];
+  rowNumbers.sort((a,b)=>a-b).forEach(r => {
+    results.push(createDocFromRow(r));
+  });
+  return results;
+}
+
+/***** สร้างเอกสารจากแถวเดียว (ถูกเรียกใช้ภายใน) *****/
+function createDocFromRow(rowNumber) {
+  const sh = SpreadsheetApp.getActive().getSheetByName(CONFIG.SHEET_NAME);
+  const lastCol = sh.getLastColumn();
+  const header = sh.getRange(CONFIG.HEADER_ROW, 1, 1, lastCol).getValues()[0];
+  const data = sh.getRange(rowNumber, 1, 1, lastCol).getValues()[0];
+
+  const kv = {};
+  header.forEach((h,i) => {
+    const key = String(h || '').trim();
+    if (key) kv[key] = toText(data[i]);
+  });
+
+  const namePart  = kv['ชื่อ-สกุล'] || kv['ชื่อ'] || `Row${rowNumber}`;
+  const topicPart = kv['หัวข้อ'] || kv['เรื่อง'] || '';
+  const fileName = `เอกสาร-${namePart}${topicPart ? ' - ' + topicPart : ''}`.substring(0,140);
+
+  const template = DriveApp.getFileById(CONFIG.TEMPLATE_DOC_ID);
+  const copy = template.makeCopy(fileName);
+  if (CONFIG.OUTPUT_FOLDER_ID) {
+    const folder = DriveApp.getFolderById(CONFIG.OUTPUT_FOLDER_ID);
+    folder.addFile(copy); DriveApp.getRootFolder().removeFile(copy);
+  }
+
+  const doc = DocumentApp.openById(copy.getId());
+  const body = doc.getBody();
+  Object.keys(kv).forEach(k => {
+    body.replaceText(escapeForRegExp(`{{${k}}}`), kv[k]);
+  });
+  doc.saveAndClose();
+
+  const urlCol = ensureDocUrlColumn(sh, header);
+  sh.getRange(rowNumber, urlCol).setValue(copy.getUrl());
+
+  return { rowNumber, fileName, url: copy.getUrl(), fileId: copy.getId() };
+}
+
+/***** Utils *****/
+function toText(v){
+  if (v == null) return '';
+  if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), 'd MMM yy HH:mm');
+  return String(v);
+}
+function escapeForRegExp(t){ return t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
+function ensureDocUrlColumn(sh, header){
+  let idx = header.findIndex(h => String(h).trim() === CONFIG.DOC_URL_HEADER);
+  if (idx >= 0) return idx + 1;
+  const col = sh.getLastColumn() + 1;
+  sh.getRange(CONFIG.HEADER_ROW, col).setValue(CONFIG.DOC_URL_HEADER);
+  return col;
+}
+
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    body{font-family:system-ui,Arial;padding:12px}
+    h3{margin:0 0 8px}
+    .row{display:flex;gap:8px;align-items:center}
+    input,button,select{width:100%;padding:6px}
+    #rowSelect{height:300px}
+    .muted{color:#666;font-size:12px;margin-top:8px}
+    .ok{color:#0a7a3c}.err{color:#b00020}
+
+    /* ---- เพิ่มส่วนนี้เข้ามา ---- */
+    .btn-primary {
+      background-color: #06A3DA; /* สีพื้นหลังตามที่ต้องการ */
+      color: white; /* เปลี่ยนสีตัวอักษรเป็นสีขาวเพื่อให้อ่านง่าย */
+      border: none; /* เอาเส้นขอบเดิมออก */
+      cursor: pointer; /* ทำให้เมาส์เป็นรูปมือเมื่อชี้ */
+    }
+    .btn-primary:hover {
+      background-color: #0582b1; /* (แนะนำ) เพิ่มสีให้เข้มขึ้นเล็กน้อยเมื่อเมาส์ชี้ */
+    }
+    /* ------------------------ */
+
+  </style>
+</head>
+<body>
+  <!-- 🔰 โลโก้ -->
+  <img class="logo" src="https://sh.mahidol.ac.th/img/Logo/Logo_th.png" alt="Mahidol Logo">
+  <h3 style="font-size:16px;">สร้างเอกสารจากหลายแถว</h3>
+
+  <div class="row">
+    <input id="search" type="text" placeholder="ค้นหาในตัวอย่าง..." oninput="filterOptions()">
+  </div>
+
+  <div class="row" style="margin-top:8px;">
+    <!-- multiple selection -->
+    <select id="rowSelect" multiple></select>
+  </div>
+
+  <div class="row" style="margin-top:8px;">
+    <!-- 👇 แก้ไขบรรทัดนี้โดยการเพิ่ม class="btn-primary" เข้าไป -->
+    <button class="btn-primary" onclick="createMany()">สร้างเอกสารจากรายการที่เลือก</button>
+  </div>
+
+  <div id="msg" class="muted"></div>
+
+  <script>
+    let allRows = [];
+
+    document.addEventListener('DOMContentLoaded', () => {
+      google.script.run.withSuccessHandler(rows => {
+        allRows = rows || [];
+        render(allRows);
+        setMsg(`โหลดข้อมูล ${allRows.length} แถวแล้ว`);
+      }).withFailureHandler(showError).getRowsPreview();
+    });
+
+    function render(rows){
+      const sel = document.getElementById('rowSelect');
+      sel.innerHTML = '';
+      rows.forEach(r=>{
+        const opt = document.createElement('option');
+        opt.value = r.rowNumber;
+        opt.textContent = `แถว ${r.rowNumber} — ${r.display}`;
+        sel.appendChild(opt);
+      });
+    }
+
+    function filterOptions(){
+      const q = document.getElementById('search').value.trim().toLowerCase();
+      const filtered = !q ? allRows : allRows.filter(r => (r.display||'').toLowerCase().includes(q));
+      render(filtered);
+    }
+
+    function createMany(){
+      const sel = document.getElementById('rowSelect');
+      const chosen = Array.from(sel.selectedOptions).map(o => Number(o.value));
+      if (chosen.length === 0){ setMsg('กรุณาเลือกอย่างน้อย 1 แถว', true); return; }
+
+      setMsg(`กำลังสร้างเอกสาร ${chosen.length} รายการ...`);
+      google.script.run.withSuccessHandler(res=>{
+        // แสดงผลลัพธ์เป็นลิงก์
+        const links = (res||[]).map(r => `<li>แถว ${r.rowNumber}: <a href="${r.url}" target="_blank">${r.fileName}</a></li>`).join('');
+        setMsg(`<b>สำเร็จ</b> สร้างเอกสาร ${res.length} รายการ:<ul>${links}</ul>`, false, true);
+      }).withFailureHandler(showError)
+        .createDocsFromRows(chosen);
+    }
+
+    function setMsg(text, isErr=false, asHtml=false){
+      const el = document.getElementById('msg');
+      el.className = 'muted ' + (isErr ? 'err' : 'ok');
+      if (asHtml) el.innerHTML = text; else el.textContent = text;
+    }
+    function showError(err){ setMsg(`เกิดข้อผิดพลาด: ${err && err.message ? err.message : err}`, true); }
+  </script>
+</body>
+</html>
