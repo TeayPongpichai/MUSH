@@ -1,0 +1,217 @@
+/ระบบดึงข้อมูลบริการวิชาการ/
+// Function to run when the spreadsheet is opened. It adds a custom menu.
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('📌บริการวิชาการ')
+    .addItem('เปิด Sidebar', 'showSidebar')
+    .addToUi();
+}
+
+// Function to show the sidebar.
+function showSidebar() {
+  const html = HtmlService.createHtmlOutputFromFile('Sidebar')
+    .setTitle('ระบบดึงข้อมูลบริการวิชาการ')
+    .setWidth(300);
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+// Function to get unique names from Sheet1 to populate the dropdown in the sidebar.
+// This function will be called from the client-side (Sidebar.html).
+function getUniqueNames() {
+  try {
+    const sheet1 = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Sheet1');
+    if (!sheet1) {
+      throw new Error("ไม่พบ Sheet ที่ชื่อ 'Sheet1'");
+    }
+    // Get all names from column B (ชื่อ-สกุล), starting from row 2 to exclude header
+    const dataRange = sheet1.getRange(2, 2, sheet1.getLastRow() - 1, 1);
+    const names = dataRange.getValues().flat().filter(String); // .flat() converts 2D array to 1D, .filter(String) removes empty values
+    
+    // Return a sorted list of unique names
+    return [...new Set(names)].sort(); 
+  } catch (e) {
+    Logger.log(e.toString());
+    return []; // Return an empty array on error
+  }
+}
+
+// Main function to process the selected name and generate data in Sheet2.
+// This function will be called from the client-side (Sidebar.html).
+function processSelectedName(selectedName) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet1 = ss.getSheetByName('Sheet1');
+    if (!sheet1) {
+      return "Error: ไม่พบ Sheet ที่ชื่อ 'Sheet1'";
+    }
+
+    // Get or create Sheet2
+    let sheet2 = ss.getSheetByName('Sheet2');
+    if (sheet2) {
+      sheet2.clear(); // Clear existing data if Sheet2 exists
+    } else {
+      sheet2 = ss.insertSheet('Sheet2');
+    }
+
+    // --- Get data from Sheet1 ---
+    const data = sheet1.getDataRange().getValues();
+    const headers = data.shift(); // Remove header row and store it
+
+    // Find column indexes dynamically (this is more robust than using fixed numbers)
+    const nameColIndex = headers.indexOf('ชื่อ-สกุล');
+    const dateColIndex = headers.indexOf('วัน/เวลาดำเนินการ');
+    const typeColIndex = headers.indexOf('ประเภทงานบริการวิชาการ');
+    const detailsColIndex = headers.indexOf('รายละเอียด_หัวข้อการบรรยาย_หัวข้อการประชุม');
+
+    // Check if all required columns were found
+    if ([nameColIndex, dateColIndex, typeColIndex, detailsColIndex].includes(-1)) {
+        return "Error: ไม่พบคอลัมน์ที่ต้องการใน Sheet1 กรุณาตรวจสอบหัวคอลัมน์: 'ชื่อ-สกุล', 'วัน/เวลาดำเนินการ', 'ประเภทงานบริการวิชาการ', 'รายละเอียด_หัวข้อการบรรยาย_หัวข้อการประชุม'";
+    }
+    
+    // --- Prepare data for Sheet2 ---
+    const outputHeaders = ["ชื่อ-สกุล", "วัน_เวลาดำเนินการ", "ประเภทงานบริการวิชาการ", "รายละเอียด หัวข้อการบรรยาย หัวข้อการประชุม"];
+    const outputData = [];
+
+    // Filter data based on selected name
+    data.forEach(row => {
+      if (row[nameColIndex] === selectedName) {
+        // Create a new row with data in the desired order for Sheet2
+        const newRow = [
+          row[nameColIndex],      // ชื่อ-สกุล
+          row[dateColIndex],      // วัน/เวลาดำเนินการ
+          row[typeColIndex],      // ประเภทงานบริการวิชาการ
+          row[detailsColIndex]    // รายละเอียด...
+        ];
+        outputData.push(newRow);
+      }
+    });
+
+    // --- Write data to Sheet2 ---
+    sheet2.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]).setFontWeight('bold');
+    
+    if (outputData.length > 0) {
+      sheet2.getRange(2, 1, outputData.length, outputData[0].length).setValues(outputData);
+      sheet2.autoResizeColumns(1, outputHeaders.length); // Adjust column widths
+    }
+    
+    return `สร้างข้อมูลของ '${selectedName}' จำนวน ${outputData.length} รายการใน Sheet2 สำเร็จ!`;
+  } catch (e) {
+    return "Error: " + e.toString();
+  }
+}
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        padding: 10px;
+      }
+      select, button {
+        width: 100%;
+        padding: 8px;
+        margin-top: 10px;
+        border-radius: 4px;
+        border: 1px solid #ccc;
+      }
+      button {
+        background-color: #06A3DA;
+        color: white;
+        font-weight: bold;
+        cursor: pointer;
+      }
+      button:disabled {
+        background-color: #cccccc;
+        cursor: not-allowed;
+      }
+      #status {
+        margin-top: 15px;
+        font-size: 0.9em;
+        color: #333;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 🔰 โลโก้ -->
+  <img class="logo" src="https://sh.mahidol.ac.th/img/Logo/Logo_th.png" alt="Mahidol Logo">
+    <div>
+      <label for="name-select">เลือกชื่อ-สกุล:</label>
+      <select id="name-select">
+        <option value="">กำลังโหลดข้อมูล...</option>
+      </select>
+      
+      <button id="create-btn" onclick="generateData()">สร้างข้อมูลไปยัง Sheet2</button>
+      
+      <div id="status"></div>
+    </div>
+
+    <script>
+      // This function runs when the sidebar is loaded
+      window.onload = function() {
+        google.script.run.withSuccessHandler(populateNames).getUniqueNames();
+      };
+
+      // Callback function to populate the dropdown with names from the server
+      function populateNames(names) {
+        const select = document.getElementById('name-select');
+        select.innerHTML = ''; // Clear the "loading" message
+        
+        if (names && names.length > 0) {
+          names.forEach(function(name) {
+            const option = document.createElement('option');
+            option.value = name;
+            option.textContent = name;
+            select.appendChild(option);
+          });
+        } else {
+          const option = document.createElement('option');
+          option.textContent = 'ไม่พบข้อมูลชื่อ';
+          option.disabled = true;
+          select.appendChild(option);
+          document.getElementById('create-btn').disabled = true;
+        }
+      }
+
+      // Function to call the server-side script when the button is clicked
+      function generateData() {
+        const selectedName = document.getElementById('name-select').value;
+        if (!selectedName) {
+          document.getElementById('status').textContent = 'กรุณาเลือกชื่อก่อน';
+          return;
+        }
+        
+        const btn = document.getElementById('create-btn');
+        const statusDiv = document.getElementById('status');
+        
+        // Disable button and show processing message
+        btn.disabled = true;
+        statusDiv.textContent = 'กำลังประมวลผล...';
+
+        google.script.run
+          .withSuccessHandler(onSuccess)
+          .withFailureHandler(onFailure)
+          .processSelectedName(selectedName);
+      }
+
+      // Callback function for a successful operation
+      function onSuccess(message) {
+        const btn = document.getElementById('create-btn');
+        const statusDiv = document.getElementById('status');
+        
+        statusDiv.textContent = message;
+        btn.disabled = false; // Re-enable the button
+      }
+
+      // Callback function for a failed operation
+      function onFailure(error) {
+        const btn = document.getElementById('create-btn');
+        const statusDiv = document.getElementById('status');
+        
+        statusDiv.textContent = 'เกิดข้อผิดพลาด: ' + error.message;
+        btn.disabled = false; // Re-enable the button
+      }
+    </script>
+  </body>
+</html>
